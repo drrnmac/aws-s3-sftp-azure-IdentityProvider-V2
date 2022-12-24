@@ -62,7 +62,7 @@ exports.handler = async (event) => {
         var response = {
             Role: s3Role,
             HomeBucket: bucket,
-            HomeDirectory: '/' + bucket + '/' + userName.toLowerCase(),
+            HomeDirectory: '/' + bucket + '/' + userName.split("@")[0].toLowerCase(),
             Policy: JSON.stringify(scopedPolicy)
         };
         return response;
@@ -136,22 +136,10 @@ var scopedPolicy = {
             }
         },
         {
-            Sid: 'allowListBuckets',
-            Effect: 'Allow',
-            Action: [
-                's3:ListAllMyBuckets',
-                's3:GetBucketLocation'
-            ],
-            Resource: '*'
-        },
-        {
             Sid: 'HomeDirectoryAccess',
             Effect: 'Allow',
             Action: [
-                's3:PutObject',
                 's3:GetObject',
-                's3:DeleteObjectVersion',
-                's3:DeleteObject',
                 's3:GetObjectVersion'
             ],
             Resource: [
@@ -171,5 +159,3 @@ var scopedPolicy = {
         }
     ]
 };
-
-

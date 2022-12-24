@@ -1,0 +1,541 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "An API gateway that can be interacted with AWS Transfer for SFTP. This has a basic lambda function that the code should be replaced with the identity provider that you choose to implement",
+    "Metadata": {
+        "AWS::CloudFormation::Interface": {
+            "ParameterGroups": [
+                {
+                    "Label": {
+                        "default": "API & Function Setup"
+                    },
+                    "Parameters": [
+                        "ApiEndpointName",
+                        "LambdaFunctionName"
+                    ]
+                },
+                {
+                    "Label": {
+                        "default": "Function Environment Variable Setup"
+                    },
+                    "Parameters": [
+                        "S3Bucket",
+                        "TenantID",
+                        "S3RoleArn",
+                        "AzureClientId"
+                    ]
+                }
+            ],
+            "ParameterLabels": {
+                "S3Bucket": {
+                    "default": "S3 Bucket Name:"
+                },
+                "ApiEndpointName": {
+                    "default": "API Endpoint Name:"
+                },
+                "LambdaFunctionName": {
+                    "default": "Lambda Function Name:"
+                },
+                "TenantID": {
+                    "default": "Azure Tenant ID:"
+                },
+                "S3RoleArn": {
+                    "default": "S3 Access ARN:"
+                },
+                "AzureClientId": {
+                    "default": "Azure Application ID:"
+                }
+            }
+        }
+    },
+    "Parameters": {
+        "S3Bucket": {
+            "Type": "String",
+            "Description": "The name of the S3 bucket that we wish to give SFTP access to"
+        },
+        "ApiEndpointName": {
+            "Type": "String",
+            "Description": "Name of your API Endpoint for Azure Identity Provider Validation",
+            "Default": "Azure-AD-IdentityValidator-API-Endpoint"
+        },
+        "LambdaFunctionName": {
+            "Type": "String",
+            "Description": "Name of your Lambda function for Azure Identity Provider Validation",
+            "Default": "Azure-AD-IdentityValidator",
+            "AllowedPattern": "[A-Za-z0-9_-]+"
+        },
+        "TenantID": {
+            "Type": "String",
+            "Description": "The principle domain in Azure. Example: example.com, where UserName would look like 'username@example.com'. Your Tenant ID (123fw-afw-asdf123-adfasdfsf) can be used here as well.",
+            "Default": "mydomain.com"
+        },
+        "S3RoleArn": {
+            "Type": "String",
+            "Description": "The IAM Role that will be used to to allow access to S3 bucket",
+            "AllowedPattern": "arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9,+=@_-]+"
+        },
+        "AzureClientId": {
+            "Type": "String",
+            "Description": "The Azure Application ID that is in relation to your Azure Application and Subscription"
+        }
+    },
+    "Resources": {
+        "IdentityValidationFunction": {
+            "Type": "AWS::Lambda::Function",
+            "Properties": {
+                "FunctionName": {
+                    "Fn::Sub": "${LambdaFunctionName}"
+                },
+                "Code": {
+                    "ZipFile": "const AWS=require('aws-sdk');const https=require('https');const queryString=require('querystring');exports.handler=async(event)=>{const tenantId=await decryptVariable(process.env.TenantID);const clientId=await decryptVariable(process.env.AzureClientId);const bucket=await decryptVariable(process.env.S3BucketName);const s3Role=await decryptVariable(process.env.S3RoleArn);const domain=tenantId;var userName=event.username;if(userName.includes('%40')){userName=decodeURIComponent(userName)}else{userName=`${userName}@${domain}`};var credentials={client_id:clientId,response_type:'token',scope:'https://graph.microsoft.com/User.Read',grant_type:'password',username:userName,password:event.password};var postData=queryString.stringify(credentials);var options={method:'POST',host:'login.microsoftonline.com',path:`/${tenantId}/oauth2/v2.0/token`,headers:{'Accept':'application/json','Content-Type':'application/x-www-form-urlencoded','Content-Length':postData.length}};var token=await webRequest(options,postData);if(!token.access_token){if(token.error){console.log({status:'Failure',user:userName,error:token.error,errorUri:token.error_uri})};return{}}else{console.log({status:'Success',user:userName,scope:token.scope});var response={Role:s3Role,HomeBucket:bucket,HomeDirectory:'/'+bucket+'/'+userName.toLowerCase(),Policy:JSON.stringify(scopedPolicy)};return response}};var webRequest=(options,postData)=>new Promise((resolve)=>{const req=https.request(options,res=>{var chunk='';res.on('data',d=>{chunk+=d}).on('end',()=>{var response=JSON.parse(chunk.toString());response.statusCode=res.statusCode;resolve(response)})});req.on('error',error=>{console.error('error',error)});if(postData){req.write(postData)};req.end()});var decryptVariable=(variable)=>new Promise((resolve)=>{if(!variable.startsWith('AQICA')){return resolve(variable)};var aws=new AWS.KMS().decrypt({CiphertextBlob:Buffer.from(variable,'base64'),EncryptionContext:{LambdaFunctionName:process.env.AWS_LAMBDA_FUNCTION_NAME}});aws.on('success',r=>{resolve(r.data.Plaintext.toString('ascii'))}).on('error',e=>{console.log('error decrypting key',e.message)}).send()});var scopedPolicy={Version:'2012-10-17',Statement:[{Sid:'allowFolderList',Action:['s3:ListBucket'],Effect:'Allow',Resource:['arn:aws:s3:::${transfer:HomeBucket}'],Condition:{StringLike:{'s3:prefix':['${transfer:UserName}/*']}}},{Sid:'allowListBuckets',Effect:'Allow',Action:['s3:ListAllMyBuckets','s3:GetBucketLocation'],Resource:'*'},{Sid:'HomeDirectoryAccess',Effect:'Allow',Action:['s3:PutObject','s3:GetObject','s3:DeleteObjectVersion','s3:DeleteObject','s3:GetObjectVersion'],Resource:['arn:aws:s3:::${transfer:HomeDirectory}/*']},{Sid:'DenyDeletionOfHomeDirectory',Effect:'Deny',Action:['s3:DeleteObjectVersion','s3:DeleteObject'],Resource:['arn:aws:s3:::${transfer:HomeDirectory}/']}]}"
+                },
+                "Description": "AWS Transfer for SFTP Identity Provider using Azure AD",
+                "Timeout": 30,
+                "Handler": "index.handler",
+                "Role": {
+                    "Fn::GetAtt": "LambdaExecutionRole.Arn"
+                },
+                "Runtime": "nodejs14.x",
+                "Environment": {
+                    "Variables": {
+                        "S3BucketName": {
+                            "Fn::Sub": "${S3Bucket}"
+                        },
+                        "S3RoleArn": {
+                            "Fn::Sub": "${S3RoleArn}"
+                        },
+                        "TenantID": {
+                            "Fn::Sub": "${TenantID}"
+                        },
+                        "AzureClientId": {
+                            "Fn::Sub": "${AzureClientId}"
+                        }
+                    }
+                }
+            }
+        },
+        "LambdaExecutionRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "RoleName": {
+                    "Fn::Sub": "${LambdaFunctionName}-Role"
+                },
+                "Description": {
+                    "Fn::Sub": "Used for Lambda Invocation for Azure Identity Provider function: ${LambdaFunctionName}"
+                },
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": [
+                                    "lambda.amazonaws.com"
+                                ]
+                            },
+                            "Action": [
+                                "sts:AssumeRole"
+                            ]
+                        }
+                    ]
+                },
+                "ManagedPolicyArns": [
+                    "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+                ]
+            }
+        },
+        "invokeIdentityValidationPermission": {
+            "Type": "AWS::Lambda::Permission",
+            "Properties": {
+                "Action": "lambda:invokeFunction",
+                "FunctionName": {
+                    "Fn::GetAtt": "IdentityValidationFunction.Arn"
+                },
+                "Principal": "apigateway.amazonaws.com",
+                "SourceArn": {
+                    "Fn::Join": [
+                        "",
+                        [
+                            "arn:aws:execute-api:",
+                            {
+                                "Ref": "AWS::Region"
+                            },
+                            ":",
+                            {
+                                "Ref": "AWS::AccountId"
+                            },
+                            ":",
+                            {
+                                "Ref": "ApiIdentityEndpoint"
+                            },
+                            "/*"
+                        ]
+                    ]
+                }
+            }
+        },
+        "ApiIdentityEndpoint": {
+            "Type": "AWS::ApiGateway::RestApi",
+            "Properties": {
+                "Name": {
+                    "Fn::Sub": "${ApiEndpointName}"
+                },
+                "Description": "Identity Provider Gateway for Transfer SFTP",
+                "FailOnWarnings": true,
+                "EndpointConfiguration": {
+                    "Types": [
+                        "REGIONAL"
+                    ]
+                }
+            }
+        },
+        "SFTPLoggingRole": {
+            "Description": "IAM role used by Transfer to log API requests to CloudWatch",
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "RoleName": {
+                    "Fn::Sub": "${LambdaFunctionName}-SFTP-Logs-Role"
+                },
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": [
+                                    "transfer.amazonaws.com"
+                                ]
+                            },
+                            "Action": [
+                                "sts:AssumeRole"
+                            ]
+                        }
+                    ]
+                },
+                "Policies": [
+                    {
+                        "PolicyName": "TransferLogsPolicy",
+                        "PolicyDocument": {
+                            "Version": "2012-10-17",
+                            "Statement": [
+                                {
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "logs:CreateLogGroup",
+                                        "logs:CreateLogStream",
+                                        "logs:DescribeLogStreams",
+                                        "logs:PutLogEvents"
+                                    ],
+                                    "Resource": {
+                                        "Fn::Sub": "*"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "ApiCloudWatchLogsRole": {
+            "Description": "IAM role used by API Gateway to log API requests to CloudWatch",
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "RoleName": {
+                    "Fn::Sub": "${ApiEndpointName}-Logs-Role"
+                },
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": [
+                                    "apigateway.amazonaws.com"
+                                ]
+                            },
+                            "Action": [
+                                "sts:AssumeRole"
+                            ]
+                        }
+                    ]
+                },
+                "Policies": [
+                    {
+                        "PolicyName": "ApiGatewayLogsPolicy",
+                        "PolicyDocument": {
+                            "Version": "2012-10-17",
+                            "Statement": [
+                                {
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "logs:CreateLogGroup",
+                                        "logs:CreateLogStream",
+                                        "logs:DescribeLogGroups",
+                                        "logs:DescribeLogStreams",
+                                        "logs:PutLogEvents",
+                                        "logs:GetLogEvents",
+                                        "logs:FilterLogEvents"
+                                    ],
+                                    "Resource": "*"
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "ApiLoggingAccount": {
+            "Type": "AWS::ApiGateway::Account",
+            "DependsOn": [
+                "ApiIdentityEndpoint"
+            ],
+            "Properties": {
+                "CloudWatchRoleArn": {
+                    "Fn::GetAtt": "ApiCloudWatchLogsRole.Arn"
+                }
+            }
+        },
+        "ApiStage": {
+            "Type": "AWS::ApiGateway::Stage",
+            "Properties": {
+                "DeploymentId": {
+                    "Ref": "ApiDeployment"
+                },
+                "MethodSettings": [
+                    {
+                        "DataTraceEnabled": false,
+                        "HttpMethod": "*",
+                        "LoggingLevel": "INFO",
+                        "ResourcePath": "/*"
+                    }
+                ],
+                "RestApiId": {
+                    "Ref": "ApiIdentityEndpoint"
+                },
+                "StageName": "prod"
+            }
+        },
+        "ApiDeployment": {
+            "DependsOn": [
+                "GetUserConfigRequest"
+            ],
+            "Type": "AWS::ApiGateway::Deployment",
+            "Properties": {
+                "RestApiId": {
+                    "Ref": "ApiIdentityEndpoint"
+                },
+                "StageName": "dummystagefordeployment"
+            }
+        },
+        "TransferIdentityProviderRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "RoleName": {
+                    "Fn::Sub": "${LambdaFunctionName}-SFTP-TransferRole"
+                },
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": "transfer.amazonaws.com"
+                            },
+                            "Action": [
+                                "sts:AssumeRole"
+                            ]
+                        }
+                    ]
+                },
+                "Policies": [
+                    {
+                        "PolicyName": "TransferCanInvokeThisApi",
+                        "PolicyDocument": {
+                            "Version": "2012-10-17",
+                            "Statement": [
+                                {
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "execute-api:Invoke"
+                                    ],
+                                    "Resource": {
+                                        "Fn::Sub": "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiIdentityEndpoint}/prod/GET/*"
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        "PolicyName": "TransferCanReadThisApi",
+                        "PolicyDocument": {
+                            "Version": "2012-10-17",
+                            "Statement": [
+                                {
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "apigateway:GET"
+                                    ],
+                                    "Resource": "*"
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "ServersResource": {
+            "Type": "AWS::ApiGateway::Resource",
+            "Properties": {
+                "RestApiId": {
+                    "Ref": "ApiIdentityEndpoint"
+                },
+                "ParentId": {
+                    "Fn::GetAtt": [
+                        "ApiIdentityEndpoint",
+                        "RootResourceId"
+                    ]
+                },
+                "PathPart": "servers"
+            }
+        },
+        "ServerIdResource": {
+            "Type": "AWS::ApiGateway::Resource",
+            "Properties": {
+                "RestApiId": {
+                    "Ref": "ApiIdentityEndpoint"
+                },
+                "ParentId": {
+                    "Ref": "ServersResource"
+                },
+                "PathPart": "{serverId}"
+            }
+        },
+        "UsersResource": {
+            "Type": "AWS::ApiGateway::Resource",
+            "Properties": {
+                "RestApiId": {
+                    "Ref": "ApiIdentityEndpoint"
+                },
+                "ParentId": {
+                    "Ref": "ServerIdResource"
+                },
+                "PathPart": "users"
+            }
+        },
+        "UserNameResource": {
+            "Type": "AWS::ApiGateway::Resource",
+            "Properties": {
+                "RestApiId": {
+                    "Ref": "ApiIdentityEndpoint"
+                },
+                "ParentId": {
+                    "Ref": "UsersResource"
+                },
+                "PathPart": "{username}"
+            }
+        },
+        "GetUserConfigResource": {
+            "Type": "AWS::ApiGateway::Resource",
+            "Properties": {
+                "RestApiId": {
+                    "Ref": "ApiIdentityEndpoint"
+                },
+                "ParentId": {
+                    "Ref": "UserNameResource"
+                },
+                "PathPart": "config"
+            }
+        },
+        "GetUserConfigRequest": {
+            "Type": "AWS::ApiGateway::Method",
+            "DependsOn": "GetUserConfigResponseModel",
+            "Properties": {
+                "AuthorizationType": "AWS_IAM",
+                "HttpMethod": "GET",
+                "Integration": {
+                    "Type": "AWS",
+                    "IntegrationHttpMethod": "POST",
+                    "Uri": {
+                        "Fn::Join": [
+                            "",
+                            [
+                                "arn:aws:apigateway:",
+                                {
+                                    "Ref": "AWS::Region"
+                                },
+                                ":lambda:path/2015-03-31/functions/",
+                                {
+                                    "Fn::GetAtt": [
+                                        "IdentityValidationFunction",
+                                        "Arn"
+                                    ]
+                                },
+                                "/invocations"
+                            ]
+                        ]
+                    },
+                    "IntegrationResponses": [
+                        {
+                            "StatusCode": 200
+                        }
+                    ],
+                    "RequestTemplates": {
+                        "application/json": "{\n  \"username\": \"$input.params('username')\",\n  \"password\": \"$util.escapeJavaScript($input.params('Password')).replaceAll(\"\\\\'\",\"'\")\",\n  \"serverId\": \"$input.params('serverId')\"\n}\n"
+                    }
+                },
+                "RequestParameters": {
+                    "method.request.header.Password": false
+                },
+                "ResourceId": {
+                    "Ref": "GetUserConfigResource"
+                },
+                "RestApiId": {
+                    "Ref": "ApiIdentityEndpoint"
+                },
+                "MethodResponses": [
+                    {
+                        "StatusCode": 200,
+                        "ResponseModels": {
+                            "application/json": "UserConfigResponseModel"
+                        }
+                    }
+                ]
+            }
+        },
+        "GetUserConfigResponseModel": {
+            "Type": "AWS::ApiGateway::Model",
+            "Properties": {
+                "RestApiId": {
+                    "Ref": "ApiIdentityEndpoint"
+                },
+                "ContentType": "application/json",
+                "Description": {
+                    "Fn::Sub": "API response for ${IdentityValidationFunction}"
+                },
+                "Name": "UserConfigResponseModel",
+                "Schema": {
+                    "$schema": "http://json-schema.org/draft-04/schema#",
+                    "title": "UserUserConfig",
+                    "type": "object",
+                    "properties": {
+                        "HomeDirectory": {
+                            "type": "string"
+                        },
+                        "Role": {
+                            "type": "string"
+                        },
+                        "Policy": {
+                            "type": "string"
+                        },
+                        "PublicKeys": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "Outputs": {}
+}
