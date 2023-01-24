@@ -1,6 +1,7 @@
 const AWS = require('aws-sdk');
 const https = require('https');
 const queryString = require('querystring');
+const msal = require("msal");
 
 /**
  * @param {object} event            event passed from sftp server
@@ -8,16 +9,22 @@ const queryString = require('querystring');
  * @param {string} event.password   password of sftp user
  * @returns                         access response
  */
+
 exports.handler = async (event) => {
-    const tenantId = await decryptVariable(process.env.TenantID);
-    const clientId = await decryptVariable(process.env.AzureClientId);
-    const bucket = await decryptVariable(process.env.S3BucketName);
-    const s3Role = await decryptVariable(process.env.S3RoleArn);
+    // Get the tenantId, clientId, redirectUri, bucket, s3Role from the event
+    const { tenantId, clientId, bucket, s3Role } = event;
 
-    //if using tenantId (the guid id) set this to your domain name example: mydomain.com
+    const config = {
+        auth: {
+            clientId,
+            authority: `https://login.microsoftonline.com/${tenantId}`
+        }
+    };
+    const userAgentApplication = new msal.UserAgentApplication(config);
+
+    // Get the username and password from the event
+    const { userName, password } = event;
     const domain = tenantId;
-
-    var userName = event.username;
 
     if (userName.includes('%40')) {
         userName = decodeURIComponent(userName);
@@ -25,49 +32,47 @@ exports.handler = async (event) => {
         userName = `${userName}@${domain}`;
     };
 
-    var credentials = {
-        client_id: clientId,
-        response_type: 'token',
-        scope: 'https://graph.microsoft.com/User.Read',
-        grant_type: 'password',
-        username: userName,
-        password: event.password
-    };
+    try {
+        // Log in the user and wait for the MFA response
+        const loginResponse = await userAgentApplication.loginPopup({
+            userName,
+            password
+        });
 
-    var postData = queryString.stringify(credentials);
-    var options = {
-        method: 'POST',
-        host: 'login.microsoftonline.com',
-        path: `/${tenantId}/oauth2/v2.0/token`,
-        headers: {
-            'Accept': 'application/json',
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Content-Length': postData.length
-        }
-    };
-
-    var token = await webRequest(options, postData);
-
-    if (!token.access_token) {
-        if (token.error) {
+        if (loginResponse.account) {
+            // The user has successfully authenticated
+            // You can now use the access token to make API calls
+            const accessToken = await userAgentApplication.acquireTokenSilent({
+                account: loginResponse.account,
+                scopes: ["https://graph.microsoft.com/User.Read"]
+            });
+            var response = {
+                Role: s3Role,
+                HomeBucket: bucket,
+                HomeDirectory: '/' + bucket + '/' + userName.split("@")[0].toLowerCase(),
+                Policy: JSON.stringify(scopedPolicy)
+            };
+            console.log({ status: 'Success', user: userName, scope: token.scope });
+            return {
+                statusCode: 200,
+                body: JSON.stringify({ response, accessToken })
+            };
+        } else {
+            // The user did not successfully authenticate
             console.log({ status: 'Failure', user: userName, error: token.error, errorUri: token.error_uri });
+            return {
+                statusCode: 401,
+                body: JSON.stringify({ error: "Unauthorized" })
+            };
+        }
+    } catch (err) {
+        return {
+            statusCode: 500,
+            body: JSON.stringify({ error: err.message })
         };
-        return {};
-    } else {
-        console.log({ status: 'Success', user: userName, scope: token.scope });
+    }
+}
 
-        /**
-         * Add Additional login here!
-         */
-        var response = {
-            Role: s3Role,
-            HomeBucket: bucket,
-            HomeDirectory: '/' + bucket + '/' + userName.split("@")[0].toLowerCase(),
-            Policy: JSON.stringify(scopedPolicy)
-        };
-        return response;
-    };
-};
 
 /**
  * @param {object} options          https options
